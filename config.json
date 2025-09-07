@@ -1,0 +1,7 @@
+{
+    "gemini_model": "gemini-2.5-flash",
+    "database_path": "photo_series.db",
+    "min_images_for_series": 2,
+    "max_images_for_series": 20,
+    "filename_pattern": "instagram"
+}
