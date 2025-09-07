@@ -14,7 +14,7 @@ GEMINI_API_KEY=PUT_YOUR_GEMINI_API_KEY_HERE
 
 With your actual key:
 ```
-GEMINI_API_KEY=AIzaSyBOXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+GEMINI_API_KEY=your_actual_api_key_here
 ```
 
 ## 3. Test Installation
