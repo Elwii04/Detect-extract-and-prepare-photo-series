@@ -2,8 +2,8 @@
 """
 Visual Image Series Reviewer for Photo Series Detector
 
-This tool provides a visual interface to review AI-detected photo series,
-showing included/excluded images with color coding and proper ordering.
+This tool provides a visual interface to review and modify AI-detected photo series,
+allowing you to edit inclusion/exclusion status, reorder images, and manage series.
 
 Usage:
     python visual_reviewer.py --db-path photo_series.db
@@ -11,9 +11,21 @@ Usage:
 Controls:
     ← → Arrow keys: Navigate between series
     ↑ ↓ Arrow keys: Navigate between images in current series  
-    ESC/Q: Quit
+    ESC/Q: Quit (with save prompt if changes exist)
     I: Show image info
-    SPACE: Toggle fullscreen view
+    SPACE/T: Toggle current image inclusion
+    S: Save all changes to database
+    R: Reset changes for current series
+    DELETE: Delete current series completely
+    
+Mouse Controls:
+    Click image: Toggle inclusion status (red/green)
+    Ctrl+Click+Drag: Reorder images (for included images only)
+    
+Buttons:
+    🗑️ Delete Series: Remove series from database permanently
+    💾 Save Changes: Save all modifications to database  
+    ↺ Reset Changes: Reset current series to original state
 """
 
 import sqlite3
@@ -39,6 +51,7 @@ class SeriesViewer:
         self.series_data = []
         self.current_series_idx = 0
         self.current_image_idx = 0
+        self.modified_series = set()  # Track which series have been modified
         
         # Load data from database
         self.load_series_data()
@@ -191,10 +204,265 @@ class SeriesViewer:
         
         return sorted(images, key=extract_number)
     
+    def delete_current_series(self):
+        """Delete the current series from the database"""
+        if not self.series_data:
+            return
+        
+        current_series = self.series_data[self.current_series_idx]
+        
+        # Confirm deletion
+        result = messagebox.askyesno(
+            "Delete Series", 
+            f"Are you sure you want to delete the series:\n\n"
+            f"'{current_series['base_name']}'\n\n"
+            f"This will permanently remove it from the database and cannot be undone.",
+            icon='warning'
+        )
+        
+        if result:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Delete the series from database
+                cursor.execute("DELETE FROM series WHERE id = ?", (current_series['id'],))
+                conn.commit()
+                conn.close()
+                
+                # Remove from local data
+                self.series_data.pop(self.current_series_idx)
+                self.modified_series.discard(self.current_series_idx)
+                
+                # Adjust current index
+                if self.current_series_idx >= len(self.series_data) and self.series_data:
+                    self.current_series_idx = len(self.series_data) - 1
+                elif not self.series_data:
+                    self.current_series_idx = 0
+                
+                self.current_image_idx = 0
+                
+                if self.series_data:
+                    self.update_display()
+                    messagebox.showinfo("Deleted", "Series deleted successfully!")
+                else:
+                    messagebox.showinfo("No More Series", "No more series to review.")
+                    self.root.quit()
+                    
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to delete series: {str(e)}")
+    
+    def toggle_image_inclusion(self, img_idx: int):
+        """Toggle whether an image is included in the series"""
+        if not self.series_data:
+            return
+        
+        current_series = self.series_data[self.current_series_idx]
+        images = self.get_current_images()
+        
+        if 0 <= img_idx < len(images):
+            img_path, current_status = images[img_idx]
+            filename = os.path.basename(img_path)
+            
+            # Mark this series as modified
+            self.modified_series.add(self.current_series_idx)
+            
+            if current_status:  # Currently included, remove it
+                # Remove from included images
+                current_series['included_images'] = [
+                    img for img in current_series['included_images'] 
+                    if img['path'] != filename
+                ]
+                # Add to excluded images if not already there
+                if filename not in current_series['excluded_images']:
+                    current_series['excluded_images'].append(filename)
+                    
+            else:  # Currently excluded, include it
+                # Remove from excluded images
+                current_series['excluded_images'] = [
+                    img for img in current_series['excluded_images'] 
+                    if img != filename
+                ]
+                # Add to included images with next order number
+                max_order = max([img.get('order', 0) for img in current_series['included_images']], default=0)
+                current_series['included_images'].append({
+                    'path': filename,
+                    'order': max_order + 1
+                })
+            
+            self.update_display()
+    
+    def move_image(self, from_idx: int, to_idx: int):
+        """Move an image from one position to another in the included list"""
+        if not self.series_data:
+            return
+        
+        current_series = self.series_data[self.current_series_idx]
+        images = self.get_current_images()
+        
+        if not (0 <= from_idx < len(images) and 0 <= to_idx < len(images)):
+            return
+        
+        from_img_path, from_status = images[from_idx]
+        to_img_path, to_status = images[to_idx]
+        
+        # Only allow reordering among included images
+        if not (from_status and to_status):
+            return
+        
+        from_filename = os.path.basename(from_img_path)
+        to_filename = os.path.basename(to_img_path)
+        
+        # Mark this series as modified
+        self.modified_series.add(self.current_series_idx)
+        
+        # Find the images in the included list
+        included_images = current_series['included_images']
+        from_img = None
+        to_img = None
+        
+        for img in included_images:
+            if img['path'] == from_filename:
+                from_img = img
+            elif img['path'] == to_filename:
+                to_img = img
+        
+        if from_img and to_img:
+            # Swap their order values
+            from_img['order'], to_img['order'] = to_img['order'], from_img['order']
+            self.update_display()
+    
+    def save_changes(self):
+        """Save all changes back to the database"""
+        if not self.modified_series:
+            messagebox.showinfo("No Changes", "No changes to save.")
+            return
+        
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            saved_count = 0
+            for series_idx in self.modified_series:
+                if series_idx < len(self.series_data):
+                    series = self.series_data[series_idx]
+                    
+                    # Reconstruct the parsed response
+                    parsed_response = {
+                        "images": series['included_images'],
+                        "excluded_images": series['excluded_images'],
+                        "confidence": series['confidence'],
+                        "reason": series['reason']
+                    }
+                    
+                    # Update the database
+                    cursor.execute("""
+                        UPDATE series 
+                        SET gemini_parsed_response = ?, image_count = ?
+                        WHERE id = ?
+                    """, (
+                        json.dumps(parsed_response),
+                        len(series['included_images']),
+                        series['id']
+                    ))
+                    saved_count += 1
+            
+            conn.commit()
+            conn.close()
+            
+            # Clear modified series
+            self.modified_series.clear()
+            
+            messagebox.showinfo("Saved", f"Successfully saved changes to {saved_count} series!")
+            self.update_display()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save changes: {str(e)}")
+    
+    def reset_changes(self):
+        """Reset changes for the current series"""
+        if self.current_series_idx not in self.modified_series:
+            messagebox.showinfo("No Changes", "No changes to reset for this series.")
+            return
+        
+        result = messagebox.askyesno(
+            "Reset Changes", 
+            "Are you sure you want to reset all changes for this series?\n\n"
+            "This will reload the original data from the database.",
+            icon='warning'
+        )
+        
+        if result:
+            # Reload this series from database
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                current_series = self.series_data[self.current_series_idx]
+                cursor.execute("""
+                    SELECT gemini_parsed_response 
+                    FROM series 
+                    WHERE id = ?
+                """, (current_series['id'],))
+                
+                row = cursor.fetchone()
+                if row:
+                    parsed_response = json.loads(row[0])
+                    
+                    # Reset the series data
+                    current_series['included_images'] = parsed_response.get("images", [])
+                    current_series['excluded_images'] = parsed_response.get("excluded_images", [])
+                    current_series['confidence'] = parsed_response.get("confidence", 0.0)
+                    current_series['reason'] = parsed_response.get("reason", "")
+                    
+                    # Remove from modified set
+                    self.modified_series.discard(self.current_series_idx)
+                    
+                    self.update_display()
+                    messagebox.showinfo("Reset", "Series changes have been reset!")
+                
+                conn.close()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to reset changes: {str(e)}")
+    
+    def on_drag(self, event):
+        """Handle drag motion for reordering"""
+        if not self.dragging:
+            return
+        
+        # Visual feedback could be added here
+        # For now, just track the movement
+        pass
+    
+    def on_drag_end(self, event):
+        """Handle end of drag operation"""
+        if not self.dragging:
+            return
+        
+        self.dragging = False
+        
+        # Calculate drop position
+        x = self.canvas.canvasx(event.x)
+        drop_idx = self.get_image_at_position(x)
+        
+        if drop_idx is not None and drop_idx != self.drag_image_idx:
+            print(f"Moving image from {self.drag_image_idx} to {drop_idx}")
+            self.move_image(self.drag_image_idx, drop_idx)
+        
+        self.drag_image_idx = None
+    
+    def get_image_at_position(self, x: float) -> Optional[int]:
+        """Get the image index at a given x position"""
+        for start_x, end_x, idx in self.image_positions:
+            if start_x <= x <= end_x:
+                return idx
+        return None
+    
     def setup_gui(self):
         """Setup the GUI layout"""
         # Top frame for series info
-        self.info_frame = tk.Frame(self.root, bg='#2b2b2b', height=120)
+        self.info_frame = tk.Frame(self.root, bg='#2b2b2b', height=160)
         self.info_frame.pack(fill='x', padx=10, pady=5)
         self.info_frame.pack_propagate(False)
         
@@ -213,9 +481,34 @@ class SeriesViewer:
                                      fg='#4CAF50', bg='#2b2b2b', wraplength=1100)
         self.caption_label.pack(pady=2)
         
+        # Button frame for actions
+        self.button_frame = tk.Frame(self.info_frame, bg='#2b2b2b')
+        self.button_frame.pack(pady=5)
+        
+        # Delete series button
+        self.delete_btn = tk.Button(self.button_frame, text="🗑️ Delete Series", 
+                                   command=self.delete_current_series,
+                                   bg='#F44336', fg='white', font=('Arial', 10, 'bold'),
+                                   padx=10, pady=5)
+        self.delete_btn.pack(side='left', padx=5)
+        
+        # Save changes button
+        self.save_btn = tk.Button(self.button_frame, text="💾 Save Changes", 
+                                 command=self.save_changes,
+                                 bg='#4CAF50', fg='white', font=('Arial', 10, 'bold'),
+                                 padx=10, pady=5)
+        self.save_btn.pack(side='left', padx=5)
+        
+        # Reset changes button
+        self.reset_btn = tk.Button(self.button_frame, text="↺ Reset Changes", 
+                                  command=self.reset_changes,
+                                  bg='#FF9800', fg='white', font=('Arial', 10, 'bold'),
+                                  padx=10, pady=5)
+        self.reset_btn.pack(side='left', padx=5)
+        
         # Controls info
         self.controls_label = tk.Label(self.info_frame, 
-                                      text="← → Series Navigation | ↑ ↓ Image Navigation | ESC Quit | I Info | SPACE Fullscreen", 
+                                      text="← → Series | ↑ ↓ Images | Click to Toggle | Ctrl+Drag to Reorder | Del Delete | S Save | R Reset | ESC Quit", 
                                       font=('Arial', 9), fg='#888888', bg='#2b2b2b')
         self.controls_label.pack(pady=2)
         
@@ -231,8 +524,16 @@ class SeriesViewer:
         self.canvas.pack(side="top", fill="both", expand=True)
         self.scrollbar.pack(side="bottom", fill="x")
         
+        # Variables for drag and drop
+        self.dragging = False
+        self.drag_start_x = 0
+        self.drag_image_idx = None
+        self.image_positions = []  # Store image positions for drag/drop
+        
         # Bind canvas events
         self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_drag_end)
         self.canvas.bind("<Configure>", self.on_canvas_configure)
     
     def add_border_to_image(self, img: Image.Image, is_included: bool, is_selected: bool = False) -> Image.Image:
@@ -265,6 +566,8 @@ class SeriesViewer:
         
         # Update info labels
         title = f"[{self.current_series_idx + 1}/{len(self.series_data)}] {current_series['base_name']}"
+        if self.current_series_idx in self.modified_series:
+            title += " 🔄 MODIFIED"
         self.title_label.config(text=title)
         
         included_count = len(current_series['included_images'])
@@ -272,6 +575,8 @@ class SeriesViewer:
         confidence = current_series['confidence']
         
         stats = f"✅ {included_count}/{total_count} images included | Confidence: {confidence:.1%}"
+        if self.modified_series:
+            stats += f" | 🔄 {len(self.modified_series)} series modified"
         self.stats_label.config(text=stats)
         
         caption = f"🎬 \"{current_series['caption']}\""
@@ -281,6 +586,7 @@ class SeriesViewer:
         self.canvas.delete("all")
         # Clear image references to prevent memory leaks
         self.canvas.image_refs = []
+        self.image_positions = []  # Reset image positions
         
         # Display images horizontally
         x_offset = 10
@@ -395,7 +701,11 @@ class SeriesViewer:
                     
                     # Store image info for clicking
                     self.canvas.tag_bind(item_id, "<Button-1>", 
-                                       lambda e, idx=i: self.select_image(idx))
+                                       lambda e, idx=i: self.on_image_click(idx, e))
+                    
+                    # Store position info for drag and drop
+                    self.canvas.itemconfig(item_id, tags=f"image_{i}")
+                    self.image_positions.append((x_offset, x_offset + bordered_img.width, i))
                     
                     x_offset += bordered_img.width + 10  # Reduced spacing
                     
@@ -480,6 +790,27 @@ class SeriesViewer:
         
         return display_images
     
+    def on_image_click(self, idx: int, event):
+        """Handle clicking on an image"""
+        # Check if this is the start of a drag operation (Ctrl key for reordering)
+        if event.state & 0x0004:  # Ctrl key held (more reliable than Shift)
+            # Start drag operation for reordering (only for included images)
+            images = self.get_current_images()
+            if 0 <= idx < len(images):
+                img_path, is_included = images[idx]
+                if is_included:  # Only allow dragging included images
+                    self.dragging = True
+                    self.drag_start_x = event.x
+                    self.drag_image_idx = idx
+                    self.current_image_idx = idx
+                    print(f"Started drag for image {idx}")
+                else:
+                    print("Can only reorder included (green) images")
+        else:
+            # Toggle inclusion status
+            self.toggle_image_inclusion(idx)
+            self.current_image_idx = idx
+    
     def select_image(self, idx: int):
         """Select an image by index"""
         images = self.get_current_images()
@@ -498,7 +829,22 @@ class SeriesViewer:
     def on_key_press(self, event):
         """Handle keyboard navigation"""
         if event.keysym == 'Escape' or event.keysym.lower() == 'q':
-            self.root.quit()
+            # Check for unsaved changes
+            if self.modified_series:
+                result = messagebox.askyesnocancel(
+                    "Unsaved Changes",
+                    f"You have unsaved changes in {len(self.modified_series)} series.\n\n"
+                    "Do you want to save before exiting?",
+                    icon='warning'
+                )
+                if result is True:  # Yes, save
+                    self.save_changes()
+                    self.root.quit()
+                elif result is False:  # No, don't save
+                    self.root.quit()
+                # Cancel - do nothing
+            else:
+                self.root.quit()
         
         elif event.keysym == 'Left':
             # Previous series
@@ -533,8 +879,24 @@ class SeriesViewer:
             self.show_image_info()
         
         elif event.keysym == 'space':
-            # Toggle fullscreen (not implemented yet)
-            pass
+            # Toggle inclusion of current image
+            self.toggle_image_inclusion(self.current_image_idx)
+        
+        elif event.keysym.lower() == 's':
+            # Save changes
+            self.save_changes()
+        
+        elif event.keysym.lower() == 'r':
+            # Reset changes
+            self.reset_changes()
+        
+        elif event.keysym == 'Delete':
+            # Delete current series
+            self.delete_current_series()
+        
+        elif event.keysym.lower() == 't':
+            # Toggle current image inclusion
+            self.toggle_image_inclusion(self.current_image_idx)
     
     def show_image_info(self):
         """Show detailed information about current series and image"""
