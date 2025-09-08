@@ -28,6 +28,7 @@ except ImportError:
 from photo_series_detector import PhotoSeriesDetector, find_image_series
 from create_dataset import create_video_training_dataset
 from db_stats import show_database_stats
+import sqlite3
 
 def load_config():
     """Load configuration from config.json"""
@@ -42,6 +43,70 @@ def load_config():
         "max_images_for_series": 14,
         "filename_pattern": "instagram"
     }
+
+def get_existing_series_from_db(db_path):
+    """Get list of series that have already been analyzed"""
+    if not os.path.exists(db_path):
+        return set()
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT base_name FROM series")
+        existing_series = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        return existing_series
+    except Exception as e:
+        print(f"⚠️  Warning: Could not read existing series from database: {e}")
+        return set()
+
+def check_database_status_and_filter(db_path, series_dict):
+    """Check database status and filter out already processed series"""
+    if not os.path.exists(db_path):
+        print(f"📊 Database Status: New database will be created at {db_path}")
+        return series_dict, 0, 0
+    
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get database statistics
+        cursor.execute("SELECT COUNT(*) FROM series")
+        total_analyzed = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM series WHERE is_series = 1")
+        confirmed_series = cursor.fetchone()[0]
+        
+        # Get existing series base names
+        cursor.execute("SELECT base_name FROM series")
+        existing_series = {row[0] for row in cursor.fetchall()}
+        conn.close()
+        
+        print(f"📊 Database Status:")
+        print(f"   📈 Total series analyzed: {total_analyzed}")
+        print(f"   ✅ Confirmed photo series: {confirmed_series}")
+        print(f"   📁 Series in database: {len(existing_series)}")
+        
+        # Filter out already processed series
+        new_series_dict = {}
+        skipped_count = 0
+        
+        for base_name, image_paths in series_dict.items():
+            if base_name in existing_series:
+                skipped_count += 1
+            else:
+                new_series_dict[base_name] = image_paths
+        
+        print(f"   🔍 Found {len(series_dict)} total series in directory")
+        print(f"   ⏭️  Skipping {skipped_count} already processed series")
+        print(f"   🆕 New series to process: {len(new_series_dict)}")
+        
+        return new_series_dict, total_analyzed, confirmed_series
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Could not read database status: {e}")
+        print("   Proceeding with all series...")
+        return series_dict, 0, 0
 
 def analyze_images(args):
     """Analyze images for photo series detection"""
@@ -78,6 +143,15 @@ def analyze_images(args):
         print("❌ No image series found with Instagram naming patterns.")
         print("   Expected format: YYYY_MM_DD_HH_MM_SS_username_caption_XX.jpg")
         return False
+    
+    # Check database status and filter out already processed series
+    series_dict, existing_total, existing_confirmed = check_database_status_and_filter(db_path, series_dict)
+    
+    if not series_dict:
+        print("✅ All series in this directory have already been processed!")
+        print(f"💡 Current database contains {existing_total} analyzed series ({existing_confirmed} confirmed)")
+        print("   Use 'python main.py stats' to see detailed statistics")
+        return True
     
     # Sort series by number of images (largest first) - this is now the default
     if args.sort_by_size:
@@ -178,10 +252,18 @@ def analyze_images(args):
     
     # Print summary
     print(f"\n📊 Analysis Complete!")
-    print(f"   🔍 Series processed: {total_series}")
-    print(f"   ✅ Valid series found: {valid_series}")
-    print(f"   📸 Total images analyzed: {total_images}")
+    print(f"   🔍 New series processed: {total_series}")
+    print(f"   ✅ New valid series found: {valid_series}")
+    print(f"   📸 New images analyzed: {total_images}")
     print(f"   💾 Results saved to: {db_path}")
+    
+    # Show updated database totals
+    if existing_total > 0:
+        final_total = existing_total + total_series
+        final_confirmed = existing_confirmed + valid_series
+        print(f"\n📈 Updated Database Totals:")
+        print(f"   📊 Total series in database: {final_total}")
+        print(f"   ✅ Total confirmed series: {final_confirmed}")
     
     if valid_series > 0:
         print(f"\n💡 Next steps:")
